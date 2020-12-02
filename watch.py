@@ -51,17 +51,17 @@ def exec(command):
     os.system(command)
 
 
-def is_scheduled(hdata, delay, last, t):
-    return ((int(hdata['lastchange'])+delay) < t and last < int(hdata['lastchange']))
+def is_scheduled(hdata, delay, lastaction, t):
+    return ((int(hdata['lastchange'])+delay) < t and lastaction < int(hdata['lastchange']))
 
-def handle_notifies(hconf, hdata, t):
+def handle_down_notifies(hconf, hdata, t):
     ntf = hconf.get('notify', [])
     delay = hconf.get('notify_delay', 0)
     last = int(hdata.get('lastnotify', 0))
     
     if is_scheduled(hdata, delay, last, t):
         for n in ntf:
-            notify(hn, n, dta[hn])
+            notify(n, 'host % is down for %d seconds' % (hconf['hostname'], delay), str(dta[hn]))
         hdata['lastnotify'] = t
         hdata['lastnotify_lima'] = lima(t)
 
@@ -77,6 +77,8 @@ def handle_hostdown(hconf, hdata, t):
         hdata['lastexec_lima'] = lima(t)
     else:
         d("... no execution.")
+
+    handle_down_notifies(hconf, hdata, t)
 
 
 def handle_hostup(hconf, hdata, t):
