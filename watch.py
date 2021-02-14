@@ -64,7 +64,7 @@ async def doexec(command):
     raise
 
 
-def sendmail(email, subj, body):
+async def sendmail(email, subj, body):
     logging.debug("Sending notify subj=%s body=%s to %s" % (subj, body, email))
 
     bbody = body.encode()
@@ -99,7 +99,7 @@ async def hosts_process(cfg, sqlitefile):
             for n in h.get('notify', []):
               if not lastts:
                 lastts = 0
-              sendmail(n, f"Host {h['hostname']} is down", f"Host {h['hostname']} is down at {lima(t)}. Previous status change were at {lima(lastts)}.")
+              await sendmail(n, f"Host {h['hostname']} is down", f"Host {h['hostname']} is down at {lima(t)}. Previous status change were at {lima(lastts)}.")
             conn.execute("INSERT INTO notifies VALUES (?,?,0)", (int(t), h['hostname']))
             conn.commit()
           else:
@@ -127,20 +127,22 @@ async def conn_process(cfg, sqlitefile):
       score = [r for _,r in conn.execute('SELECT timestamp, result FROM tests WHERE host = ? AND timestamp >= (? - ?) ORDER BY timestamp DESC', (h, int(t), int(cfgcon.get('exec_delay', 1800))))]
       if len(score) >= min_points: # test if the results are relevant
         if check_failseries(score): # line of errors longer than minimum
-          pass
+          logging.debug(f"Connectivity down for {h}.")
         else:
+          logging.debug(f"Connectivity works for {h}. Will not exec.")
           failed = False
       else:
+        logging.debug(f"Not enough data points ({len(score)}) for conn test on {h}. Will not exec.")
         failed = False
-  else:
-    failed = False
 
-  # we go past this point if all checks failed and we have enough values
-  if failed and 'exec' in cfgcon:
-    logging.warning(f"Connectivity check failed, going to exec the command.")
-    doexec(cfgcon['exec'])
+    # we go past this point if all checks failed and we have enough values
+    if failed and 'exec' in cfgcon:
+      logging.warning(f"Connectivity check failed, going to exec the command.")
+      await doexec(cfgcon['exec'])
+    else:
+      logging.warning(f"Connectivity check OK, will not exec.")
 
-  conn.close()
+    conn.close()
 
 
 async def cleanup(sqlitefile):
