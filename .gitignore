@@ -7,3 +7,4 @@ dist/
 .*.swp
 data.yml
 data.sql
+*.debug

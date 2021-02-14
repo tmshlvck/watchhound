@@ -68,8 +68,8 @@ def sendmail(email, subj, body):
     logging.debug("Sending notify subj=%s body=%s to %s" % (subj, body, email))
 
     bbody = body.encode()
-    #subprocess.run(["mail", "-s '%s'" % subj, email], input=bbody)
-    subprocess.run(["echo", "-s '%s'" % subj, email], input=bbody)
+    subprocess.run(["mail", "-s '%s'" % subj, email], input=bbody)
+    #subprocess.run(["echo", "-s '%s'" % subj, email], input=bbody)
 
 
 def check_failseries(ser, expect=0):
@@ -92,10 +92,10 @@ async def hosts_process(cfg, sqlitefile):
       score = [r for _,r in conn.execute('SELECT timestamp, result FROM tests WHERE host = ? AND timestamp >= (? - ?) ORDER BY timestamp DESC', (h['hostname'],int(t), int(h.get('notify_delay', 3600))))]
       if len(score) >= min_points: # test if the results are relevant
         if check_failseries(score): # line of errors longer than minimum
-          logging.warning(f"Notify trigger hit for {h['hostname']} with {len(score)} data points.")
+          logging.debug(f"Notify trigger hit for {h['hostname']} with {len(score)} data points.")
           laststate, lastts = next(conn.execute('SELECT laststate,max(timestamp) FROM notifies WHERE host = ?', (h['hostname'],)))
           if laststate == 1 or laststate == None:
-            logging.warning(f"Sending notifies for {h['hostname']}")
+            logging.debug(f"Sending notifies for {h['hostname']}")
             for n in h.get('notify', []):
               if not lastts:
                 lastts = 0
@@ -103,15 +103,15 @@ async def hosts_process(cfg, sqlitefile):
             conn.execute("INSERT INTO notifies VALUES (?,?,0)", (int(t), h['hostname']))
             conn.commit()
           else:
-            logging.warning(f"Not sending notify: Notify for {h['hostname']} has been already sent.")
+            logging.debug(f"Not sending notify: Notify for {h['hostname']} has been already sent.")
         else:
           laststate, _ = next(conn.execute('SELECT laststate,max(timestamp) FROM notifies WHERE host = ?', (h['hostname'],)))
           if laststate == 0:
-            logging.warning(f"Reseting notify for {h['hostname']}. Host up.")
+            logging.debug(f"Reseting notify for {h['hostname']}. Host up.")
             conn.execute("INSERT INTO notifies VALUES (?,?,1)", (int(t), h['hostname']))
             conn.commit()
       else: # not enough data points
-        logging.warning(f"Not enough data points for {h['hostname']}. Skip.")
+        logging.debug(f"Not enough data points for {h['hostname']}. Skip.")
 
   conn.close()
 
@@ -195,13 +195,33 @@ async def asyncmain(cfg, datafilename):
   await cleanup(datafilename)
 
 
+def printlogs(datafilename):
+  conn = sqlite3.connect(datafilename)
+  print("Last checks:")
+  for h,ts,r in conn.execute("SELECT host,max(timestamp),result FROM tests GROUP BY host"):
+    print(f"{h} at {ts} ({lima(ts)}) was {'OK' if r else 'fail'}")
+
+  print("Last notifies:")
+  for h,ts,ls in conn.execute("SELECT host,max(timestamp),laststate FROM notifies GROUP BY host"):
+    print(f"{h} at {ts} ({lima(ts)}) was {'reset to OK' if ls else 'failed'}")
+
+
+  conn.close()
+
+ 
+
 @click.command()
 @click.option('-d', '--debug', 'dbg', is_flag=True)
+@click.option('-p', '--printstat', 'printstat', is_flag=True)
 @click.argument('config', type=click.File('r'), default="cfg.yml")
 @click.argument('data', type=click.Path(), default="data.sql")
-def main(dbg, config, data):
+def main(dbg, printstat, config, data):
   if dbg:
     logging.basicConfig(level=logging.DEBUG)
+
+  if printstat:
+    printlogs(data)
+    return
 
   cfg = yaml.load(config, Loader=yaml.Loader)
 
