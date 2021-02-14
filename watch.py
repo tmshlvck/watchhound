@@ -7,197 +7,206 @@ import time
 import datetime
 import sys
 import os
+import asyncio
+import sqlite3
+import logging
 
-debug = False
-retrytime = 2
 
-def d(msg):
-    if debug:
-        print(msg, file=sys.stderr)
+bin_ping = 'ping'      # the program to run in order to ping the hosts - it has to return 0 when ping is OK
+min_points = 6         # how many bad results in a row are needed to trigger
+retention_time = 36000 # how long to keep the data in SQLite
+
 
 def lima(t):
-    return datetime.datetime.fromtimestamp(t).strftime('%Y-%m-%d %H:%M:%S')
+  return datetime.datetime.fromtimestamp(t).strftime('%Y-%m-%d %H:%M:%S')
 
-def ping(host):
-    d("Ping host %s" % host)
-    try:
-        subprocess.check_output(["ping", "-c", "1", host], stderr=subprocess.STDOUT)
-        d("... ok")
-        return True                      
-    except:
-        pass
-    d("... FAILED")
-    return False
+async def ping(host):
+  logging.debug("Ping host %s" % host)
+  try:
+    proc = await asyncio.create_subprocess_exec(bin_ping, "-c", "1", host,
+      stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    stdout, stderr = await proc.communicate()
 
-def testping(host):
-    for i in [0,1,2,3,4]:
-        if i:
-            d("Retry #%d after %d sec" % (i, i*retrytime))
-            time.sleep(i*retrytime)
-        if ping(host):
-            return True
-    return False
+    if proc.returncode == 0:
+      logging.debug(f"host {host}... ok, stdout:\n{stdout.decode()}\nstderr:{stderr.decode()}")
+      return True
+    else:
+      logging.debug(f"host {host}... FAILED, stdout:\n{stdout.decode()}\nstderr:{stderr.decode()}")
+      return False
+  except Exception as e:
+    logging.debug(f"host {host}... FAILED, exception: {e}")
+  return False
 
-def notify(email, subj, body):
-    d("Sending notify subj=%s body=%s to %s" % (subj, body, email))
+async def pingtest(host, retrytime=1):
+  for i in [0,1,2,3,4]:
+    if i:
+      logging.debug("Retry #%d after %d sec" % (i, i*retrytime))
+      await asyncio.sleep(i*retrytime)
+    if await ping(host):
+      return True
+  return False
+
+
+async def test(hostname):
+  return (hostname, await pingtest(hostname))
+
+
+
+async def doexec(command):
+  logging.debug("Running shell command: %s" % command)
+  try:
+    proc = await asyncio.create_subprocess_shell(command,
+      stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    stdout, stderr = await proc.communicate()
+    logging.debug(f"Finish command {command} retcode:{proc.returncode}, stdout:\n{stdout.decode()}\nstderr:{stderr.decode()}")
+  except Exception as e:
+    logging.debug(f"Command {command} FAILED, exception: {e}")
+    raise
+
+
+def sendmail(email, subj, body):
+    logging.debug("Sending notify subj=%s body=%s to %s" % (subj, body, email))
 
     bbody = body.encode()
     #subprocess.run(["mail", "-s '%s'" % subj, email], input=bbody)
     subprocess.run(["echo", "-s '%s'" % subj, email], input=bbody)
 
 
-def exec(command):
-    d("Running shell command: %s" % command)
-    os.system(command)
-
-
-def is_scheduled(lastchange, delay, lastaction, t):
-    return ((lastchange+delay) < t and lastaction < lastchange)
-
-def handle_down_notifies(hconf, hdata, t):
-    ntf = hconf.get('notify', [])
-    delay = int(hconf.get('notify_delay', 0))
-    last = int(hdata.get('lastnotify', 0))
-    
-    if is_scheduled(int(hdata['lastchange']), delay, last, t):
-        for n in ntf:
-            notify(n, 'host %s is down for %d seconds' % (hconf['hostname'], delay), str(hdata))
-        hdata['lastnotify'] = t
-        hdata['lastnotify_lima'] = lima(t)
+def check_failseries(ser, expect=0):
+  for v in ser:
+    if v == expect:
+      pass
     else:
-      d("... notify not scheduled")
+      return False
+  return True
 
-def handle_hostdown(hconf, hdata, t):
-    exe = hconf.get('exec', None)
-    delay = int(hconf.get('exec_delay', 0))
-    last = int(hdata.get('lastexec', 0))
 
-    d("Considering host exec=%s lastchange=%d, delay=%d lastexec=%d" % (str(exe), int(hdata['lastchange']), delay, last))
-    if exe:
-      if is_scheduled(int(hdata['lastchange']), delay, last, t):
-        exec(exe)
-        hdata['lastexec'] = t
-        hdata['lastexec_lima'] = lima(t)
+async def hosts_process(cfg, sqlitefile):
+  t = time.time()
+  conn = sqlite3.connect(sqlitefile)
+  conn.execute('''CREATE TABLE IF NOT EXISTS notifies
+             (timestamp int, host text, laststate int)''')
+
+  for h in cfg.get('hosts', {}):
+    if 'notify' in h:
+      score = [r for _,r in conn.execute('SELECT timestamp, result FROM tests WHERE host = ? AND timestamp >= (? - ?) ORDER BY timestamp DESC', (h['hostname'],int(t), int(h.get('notify_delay', 3600))))]
+      if len(score) >= min_points: # test if the results are relevant
+        if check_failseries(score): # line of errors longer than minimum
+          logging.warning(f"Notify trigger hit for {h['hostname']} with {len(score)} data points.")
+          laststate, lastts = next(conn.execute('SELECT laststate,max(timestamp) FROM notifies WHERE host = ?', (h['hostname'],)))
+          if laststate == 1 or laststate == None:
+            logging.warning(f"Sending notifies for {h['hostname']}")
+            for n in h.get('notify', []):
+              if not lastts:
+                lastts = 0
+              sendmail(n, f"Host {h['hostname']} is down", f"Host {h['hostname']} is down at {lima(t)}. Previous status change were at {lima(lastts)}.")
+            conn.execute("INSERT INTO notifies VALUES (?,?,0)", (int(t), h['hostname']))
+            conn.commit()
+          else:
+            logging.warning(f"Not sending notify: Notify for {h['hostname']} has been already sent.")
+        else:
+          laststate, _ = next(conn.execute('SELECT laststate,max(timestamp) FROM notifies WHERE host = ?', (h['hostname'],)))
+          if laststate == 0:
+            logging.warning(f"Reseting notify for {h['hostname']}. Host up.")
+            conn.execute("INSERT INTO notifies VALUES (?,?,1)", (int(t), h['hostname']))
+            conn.commit()
+      else: # not enough data points
+        logging.warning(f"Not enough data points for {h['hostname']}. Skip.")
+
+  conn.close()
+
+
+async def conn_process(cfg, sqlitefile):
+  failed = True
+  cfgcon = cfg.get('connectivity', {})
+  if cfgcon:
+    t = time.time()
+    conn = sqlite3.connect(sqlitefile)
+
+    for h in cfgcon.get('hostnames', []):
+      score = [r for _,r in conn.execute('SELECT timestamp, result FROM tests WHERE host = ? AND timestamp >= (? - ?) ORDER BY timestamp DESC', (h, int(t), int(cfgcon.get('exec_delay', 1800))))]
+      if len(score) >= min_points: # test if the results are relevant
+        if check_failseries(score): # line of errors longer than minimum
+          pass
+        else:
+          failed = False
       else:
-        d("... execution not scheduled")
+        failed = False
+  else:
+    failed = False
+
+  # we go past this point if all checks failed and we have enough values
+  if failed and 'exec' in cfgcon:
+    logging.warning(f"Connectivity check failed, going to exec the command.")
+    doexec(cfgcon['exec'])
+
+  conn.close()
+
+
+async def cleanup(sqlitefile):
+  t = time.time()
+  conn = sqlite3.connect(sqlitefile)
+
+  conn.execute('DELETE FROM tests WHERE timestamp < (? + ?)', (int(retention_time), int(t)))
+
+  conn.close()
+
+
+async def add_results(rlst, sqlitefile='data.sql'):
+  def norm_res(r):
+    if r: # True -> 1
+      return 1
     else:
-        d("... nothing to execute")
+      return 0
 
-    handle_down_notifies(hconf, hdata, t)
+  t = time.time()
+
+  conn = sqlite3.connect(sqlitefile)
+  conn.execute('''CREATE TABLE IF NOT EXISTS tests
+             (timestamp int, host text, result int)''')
+
+  conn.executemany("INSERT INTO tests VALUES (?,?,?)", [(int(t), h, norm_res(r)) for h,r in rlst])
+
+  conn.commit()
+  conn.close()
 
 
-def handle_hostup(hconf, hdata, t):
-    pass
+async def asyncmain(cfg, datafilename):
+  host_tasks = [asyncio.create_task(test(h['hostname'])) for h in cfg.get('hosts', [])]
+  conn_tasks = [asyncio.create_task(test(h)) for h in cfg.get('connectivity',{}).get('hostnames', [])]
 
+  host_res = await asyncio.gather(*host_tasks)
+  conn_res = await asyncio.gather(*conn_tasks)
 
-def handle_connectivitydown(cconf, cdata, t):
-    exe = cconf.get('exec', None)
-    delay = int(cconf.get('exec_delay', 0))
-    last = int(cdata.get('lastexec', 0))
+  t = time.time()
 
-    d("Consider connectivity exec=%s lastchange=%d, delay=%d lastexec=%d" % (str(exe), int(cdata['lastchange']), delay, last))
-    if exe:
-      if is_scheduled(int(cdata['lastchange']), delay, last, t):
-        exec(exe)
-        hdata['lastexec'] = t
-        hdata['lastexec_lima'] = lima(t)
-      else:
-        d("... execution not scheduled")
-    else:
-        d("... nothing to execute")
+#  for hdef, hres in zip(cfg.get('hosts', []), host_res):
+#    print(f'{str(hdef)} : {str(hres)}')
+
+#  for cres in conn_res:
+#    print(f'{str(cres)}')
+
+  await add_results(host_res, datafilename)
+  await add_results(conn_res, datafilename)
+  
+  await hosts_process(cfg, datafilename)
+  await conn_process(cfg, datafilename)
+
+  await cleanup(datafilename)
 
 
 @click.command()
-@click.option('-d', '--debug', 'debugparam', is_flag=True)
+@click.option('-d', '--debug', 'dbg', is_flag=True)
 @click.argument('config', type=click.File('r'), default="cfg.yml")
-@click.argument('datafile', type=click.Path(), default="data.yml")
-def main(debugparam, config, datafile):
-    """
-    config:
-    ---
-    hosts:
-      - hostname: mamut.d.taaa.eu
-      - hostname: mamut.d.taaa.eu
-      - hostname: chapadlo
-        notify:
-          - tmshlvck@gmail.com
-      - hostname: lkko
-        notify:
-          - tmshlvck@gmail.com
-        notify_delay: 600
-        exec: "nohup reboot"
-        exec_delay: 3600
-    coonectivity:
-      ping:
-        - krtek.taaa.eu
-        - www.google.com
-        - www.seznam.cz
-        - taz.core.ignum.cz
-        - www.centrum.cz
-      exec_delay: 600
-      exec: "nohup reboot"
-    """
-    global debug
-    if debugparam:
-        debug=True
+@click.argument('data', type=click.Path(), default="data.sql")
+def main(dbg, config, data):
+  if dbg:
+    logging.basicConfig(level=logging.DEBUG)
 
-    cfg = yaml.load(config, Loader=yaml.Loader)
-    try:
-        with open(datafile, 'r') as dfh:
-            dta = yaml.load(dfh, Loader=yaml.Loader)
-    except:
-        dta = None
+  cfg = yaml.load(config, Loader=yaml.Loader)
 
-    if not dta:
-        dta = {}
-
-    d("Startup done. Working on %d hosts" % len(cfg['hosts']))
-    for h in cfg['hosts']:
-        hn = h['hostname']
-        p = testping(hn)
-        t = time.time()
-
-        if not hn in dta:
-            dta[hn] = {}
-
-        change = (p != dta[hn].get('laststate', False))
-        if change:
-            dta[hn]['lastchange'] = t
-            dta[hn]['lastchange_lima'] = lima(t)
-
-        dta[hn]['laststate'] = p
-        dta[hn]['lastcheck'] = t
-        dta[hn]['lastcheck_lima'] = lima(t)
-
-        if not p:
-            handle_hostdown(h, dta[hn], t)
-        else:
-            handle_hostup(h, dta[hn], t)
-
-    if 'connectivity' in cfg:
-      d('Checking local connectivity...')
-      if not 'local_connectivity' in dta:
-        dta['local_connectivity'] = {}
-
-      for h in cfg['connectivity']['ping']:
-        if testping(h):
-          dta['local_connectivity']['laststate'] = True
-          dta['local_connectivity']['lasthit'] = h
-          break
-      else:
-        dta['local_connectivity']['laststate'] = False
-        handle_connectivitydown(cfg['connectivity'], dta['local_connectivity'], t)
-
-      dta['local_connectivity']['lastcheck'] = t
-      dta['local_connectivity']['lastcheck_lima'] = lima(t)
-
-    d("Save results...")
-    with open(datafile, 'w') as dfh:
-        dfh.write(yaml.dump(dta, Dumper=yaml.Dumper))
-
-    return 0
+  asyncio.run(asyncmain(cfg, data))
 
 
 if __name__ == '__main__':
-    main()
-
+  main()

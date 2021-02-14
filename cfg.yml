@@ -1,25 +1,29 @@
 ---
 hosts:
-        - hostname: mamut.d.taaa.eu
-        - hostname: hranostaj.d.taaa.eu
-        - hostname: slepice.d.taaa.eu
-          notify_delay: 1200
-          notify:
-                - tmshlvck@gmail.com
-        - hostname: chapadlo
-          notify_delay: 1200
-          notify:
-                - tmshlvck@gmail.com
-        - hostname: lkko
-          notify_delay: 1200
-          notify:
-                - tmshlvck@gmail.com
+  - hostname: mamut.d.taaa.eu
+  - hostname: hranostaj.d.taaa.eu
+  - hostname: slepice.d.taaa.eu
+    notify_delay: 3600 
+    notify:
+      - tmshlvck@gmail.com
+  - hostname: chapadlo
+    notify_delay: 3600
+    notify:
+      - tmshlvck@gmail.com
+  - hostname: lkko
+    notify_delay: 3600
+    notify:
+      - tmshlvck@gmail.com
+
 connectivity:
-        ping:
-                - krtek.taaa.eu
-                - taz.core.ignum.cz
-                - www.seznam.cz
-                - www.google.com
-#        exec: "nohup reboot"
-        exec: "echo rebooot!!!"
-        exec_delay: 600
+  hostnames:
+    - 217.31.48.21
+    - 217.31.48.22
+    - 217.31.48.23
+    - krtek.taaa.eu
+    - taz.core.ignum.cz
+    - www.seznam.cz
+    - www.google.com
+#  exec: "nohup reboot"
+  exec: "echo rebooot!!!"
+  exec_delay: 1800

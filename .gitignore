@@ -6,4 +6,4 @@ dist/
 *.egg-info/
 .*.swp
 data.yml
-
+data.sql
